@@ -10,7 +10,7 @@ import requests
 import glob
 
 class cmb_licai(object):
-    def __init__(self, product_type, product_code):
+    def __init__(self, product_type, product_code, **kwargs):
         self.product_type = product_type
         self.product_code = product_code
         self.offline_dir = "{}_{}".format(self.product_type, self.product_code)
@@ -40,6 +40,9 @@ class cmb_licai(object):
 
     def get_offline_page_path(self, page):
         return os.path.join(self.offline_dir, "page_{:03d}.html".format(page))
+
+    def get_excel_path(self):
+        return "{}_{}.xlsx".format(self.product_type, self.product_code)
 
 class cmb_licai_webpage(cmb_licai):
     headers = {'Accept':'*/*','Accept-Encoding':'gzip, deflate','Accept-Language':'zh-CN,zh;q=0.9','Connection':'keep-alive','User-Agent':'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.79 Safari/537.36'}
@@ -74,8 +77,12 @@ class cmb_licai_data(cmb_licai):
     all_df_list: Dict[str, pd.DataFrame]
     df_name_list = ["base", "2", "7", "20", "60", "180", "360"]
 
-    def __init__(self, **kwargs):
+    def __init__(self, annualized_title_suffix="日年化", annualized_on_column="产品净值", date_column=3, name_column=1, **kwargs):
         super().__init__(**kwargs)
+        self.annualized_title_suffix = annualized_title_suffix
+        self.annualized_on_column = annualized_on_column
+        self.date_column = date_column
+        self.name_column = name_column
         self.all_df_list = {}
         for n in self.df_name_list:
             self.all_df_list[n] = None
@@ -116,25 +123,35 @@ class cmb_licai_data(cmb_licai):
             else:
                 raise Exception("Wrong count of ProductTable (= 0)")
 
-            dfs = pd.read_html(str(table_value), header=0, index_col=3)
+            dfs = pd.read_html(str(table_value), header=0, index_col=self.date_column)
             if base_df is None:
                 base_df = dfs[0]
             else:
                 new_index = [x for x in dfs[0].index if x not in base_df.index]
                 base_df = base_df.append(dfs[0].reindex(index=new_index))
-        base_df.index = pd.to_datetime(base_df.index, format='%Y%m%d')
+        try:
+            base_df.index = pd.to_datetime(base_df.index, format='%Y%m%d')
+        except:
+            base_df.index = pd.to_datetime(base_df.index, format='%Y-%m-%d')
         base_df = base_df.sort_index()
         self.all_df_list["base"] = base_df
         for n in self.df_name_list[1:]:
             new_df = base_df.copy()
-            new_df["{}日年化".format(n)] = new_df['产品净值'].rolling(int(n)).agg(self.annualized_pct_change)
+            new_df["{}{}".format(n, self.annualized_title_suffix)] = new_df[self.annualized_on_column].rolling(int(n)).agg(self.annualized_pct_change)
             self.all_df_list[n] = new_df
 
     def save_as_excel(self):
-        writer = pd.ExcelWriter("{}_{}.xlsx".format(self.product_type, self.product_code),
+        excel_fn = self.get_excel_path()
+        writer = pd.ExcelWriter(excel_fn,
                                 engine='xlsxwriter',
                                 datetime_format='yyyy-mm-dd')
         for n in self.df_name_list:
             self.all_df_list[n].sort_index(ascending=False).to_excel(writer, sheet_name=n)
         writer.save()
 
+    def load_from_excel(self):
+        self.all_df_list = {}
+        excel_fn = self.get_excel_path()
+        with pd.ExcelFile(excel_fn) as xls:
+            for n in self.df_name_list:
+                self.all_df_list[n] = pd.read_excel(xls, n, index_col=0)
